@@ -1,0 +1,20 @@
+# Credentials — never commit
+service_account.json
+
+# Virtual environment
+.scraper-venv/
+venv/
+env/
+
+# Generated data
+products.json
+assets/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
