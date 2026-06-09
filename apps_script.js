@@ -178,13 +178,23 @@ function pushActiveRow() {
     const body = JSON.parse(resp.getContentText());
 
     if (code === 200 || code === 201) {
-      const pid = body.product.id;
-      const vid = body.product.variants[0].id;
+      const pid     = body.product.id;
+      const variant = body.product.variants[0];
+      const vid     = variant.id;
       sheet.getRange(row, COL.SHOPIFY_ID).setValue(pid);
       sheet.getRange(row, COL.VARIANT_ID).setValue(vid);
-      sheet.getRange(row, COL.NOTES).setValue(
-        `${action} ${new Date().toLocaleString("en-IN")}`
-      );
+
+      // Set inventory quantity if provided in col Q (optional)
+      const qtyRaw = data[COL.QUANTITY - 1];
+      const qty    = (qtyRaw !== "" && qtyRaw !== null && qtyRaw !== undefined)
+                     ? parseInt(qtyRaw) : null;
+      let note = `${action} ${new Date().toLocaleString("en-IN")}`;
+      if (qty !== null && !isNaN(qty)) {
+        const invErr = setInventoryLevel(TOKEN, STORE, variant.inventory_item_id, qty);
+        note += invErr ? " | Inv ERR: " + invErr : ` | qty=${qty}`;
+      }
+
+      sheet.getRange(row, COL.NOTES).setValue(note);
       ui.alert(`${action}! Product ID: ${pid}`);
     } else {
       const err = body.errors
@@ -275,37 +285,13 @@ function updatePriceQty() {
       });
       if (r.getResponseCode() === 200) {
         inventoryItemId = JSON.parse(r.getContentText()).variant.inventory_item_id;
+      } else {
+        errors.push("Could not fetch variant to get inventory_item_id.");
       }
     }
-
     if (inventoryItemId) {
-      const locResp = UrlFetchApp.fetch(`${base}/locations.json`, {
-        headers: { "X-Shopify-Access-Token": TOKEN },
-        muteHttpExceptions: true
-      });
-      if (locResp.getResponseCode() === 200) {
-        const locationId = JSON.parse(locResp.getContentText()).locations[0].id;
-        const r = UrlFetchApp.fetch(`${base}/inventory_levels/set.json`, {
-          method: "post",
-          headers: {
-            "Content-Type":           "application/json",
-            "X-Shopify-Access-Token": TOKEN
-          },
-          payload:            JSON.stringify({
-            location_id:       locationId,
-            inventory_item_id: inventoryItemId,
-            available:         qty
-          }),
-          muteHttpExceptions: true
-        });
-        if (r.getResponseCode() !== 200) {
-          errors.push("Quantity update failed: " + r.getContentText());
-        }
-      } else {
-        errors.push("Could not fetch Shopify locations.");
-      }
-    } else {
-      errors.push("Could not get inventory_item_id from variant.");
+      const invErr = setInventoryLevel(TOKEN, STORE, inventoryItemId, qty);
+      if (invErr) errors.push(invErr);
     }
   }
 
@@ -323,6 +309,35 @@ function updatePriceQty() {
 // ============================================================
 // Helpers
 // ============================================================
+
+/**
+ * Set inventory level for a variant at the first location.
+ * Returns null on success, error string on failure.
+ */
+function setInventoryLevel(TOKEN, STORE, inventoryItemId, qty) {
+  const base    = `https://${STORE}/admin/api/${API_VERSION}`;
+  const locResp = UrlFetchApp.fetch(`${base}/locations.json`, {
+    headers: { "X-Shopify-Access-Token": TOKEN },
+    muteHttpExceptions: true
+  });
+  if (locResp.getResponseCode() !== 200) return "Could not fetch locations.";
+
+  const locationId = JSON.parse(locResp.getContentText()).locations[0].id;
+  const r = UrlFetchApp.fetch(`${base}/inventory_levels/set.json`, {
+    method: "post",
+    headers: {
+      "Content-Type":           "application/json",
+      "X-Shopify-Access-Token": TOKEN
+    },
+    payload: JSON.stringify({
+      location_id:       locationId,
+      inventory_item_id: inventoryItemId,
+      available:         qty
+    }),
+    muteHttpExceptions: true
+  });
+  return r.getResponseCode() === 200 ? null : "Inventory set failed: " + r.getContentText();
+}
 
 function parseWeight(raw) {
   if (!raw) return { value: 0, unit: "g" };

@@ -102,9 +102,10 @@ def ensure_headers(ws: gspread.Worksheet) -> dict[str, int]:
     """Write headers if missing. Returns {url: row_number} for existing data rows."""
     existing = ws.get_all_values()
 
-    if not existing or existing[0] != ALL_COLS:
-        ws.update("A1", [ALL_COLS])
-        return {}   # sheet was empty / wrong headers — no data rows
+    # Prefix check — sheet may have extra cols (price/quantity/variant_id) beyond ALL_COLS
+    if not existing or existing[0][:len(ALL_COLS)] != ALL_COLS:
+        ws.update("A1", [ALL_COLS])   # only writes A1:O1, leaves P:R untouched
+        return {}   # treat as fresh — no data rows
 
     # Build url -> 1-based row number map (row 1 = header, data starts at 2)
     url_col_idx = ALL_COLS.index("url")
