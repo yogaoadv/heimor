@@ -14,16 +14,17 @@
 //   J  dimensions       K  attributes      L  images
 //   M  local_images     N  shopify_id      O  notes
 //   P  price            Q  quantity        R  variant_id
+//   S  status           T  shopify_status
 //
-// Scraper-owned (auto-filled): A-M
-// User-managed:                P (price), Q (quantity)
+// Scraper-owned (auto-filled): A-M, S (status written by runner.py)
+// User-managed:                P (price), Q (quantity), T (shopify_status: draft/active)
 // Auto-populated by script:    N (shopify_id), R (variant_id)
 // Manual notes:                O (notes)
 // ============================================================
 
-const API_VERSION  = "2026-04";
-const GITHUB_REPO  = "yogaoadv/heimor";
-const GITHUB_REF   = "master";
+const API_VERSION   = "2026-04";
+const GITHUB_REPO   = "yogaoadv/heimor";
+const GITHUB_REF    = "master";
 const WORKFLOW_FILE = "scrape.yml";
 
 const COL = {
@@ -32,7 +33,8 @@ const COL = {
   WEIGHT: 9, DIMENSIONS: 10, ATTRIBUTES: 11,
   IMAGES: 12, LOCAL_IMAGES: 13,
   SHOPIFY_ID: 14, NOTES: 15,
-  PRICE: 16, QUANTITY: 17, VARIANT_ID: 18
+  PRICE: 16, QUANTITY: 17, VARIANT_ID: 18,
+  STATUS: 19, SHOPIFY_STATUS: 20
 };
 
 // ============================================================
@@ -42,17 +44,20 @@ const COL = {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Shopify")
-    .addItem("Scrape URL -> Sheet",      "scrapeActiveRow")
-    .addItem("Push row -> Shopify",      "pushActiveRow")
-    .addItem("Update price / quantity",  "updatePriceQty")
+    .addItem("Scrape active row",          "scrapeActiveRow")
+    .addItem("Scrape all empty rows",      "scrapeEmptyRows")
     .addSeparator()
-    .addItem("Setup sheet headers",      "setupSheetHeaders")
-    .addItem("Set credentials",          "promptCredentials")
+    .addItem("Push active row -> Shopify", "pushActiveRow")
+    .addItem("Push all unpushed",          "pushAllUnpushed")
+    .addItem("Update price / quantity",    "updatePriceQty")
+    .addSeparator()
+    .addItem("Setup sheet headers",        "setupSheetHeaders")
+    .addItem("Set credentials",            "promptCredentials")
     .addToUi();
 }
 
 // ============================================================
-// 1. Scrape URL -> triggers GitHub Actions -> Sheet auto-updates
+// 1. Scrape active row -> triggers GitHub Actions -> Sheet auto-updates
 // ============================================================
 
 function scrapeActiveRow() {
@@ -74,7 +79,7 @@ function scrapeActiveRow() {
   if (!PAT) { ui.alert("Missing GitHub PAT. Use Shopify -> Set credentials."); return; }
 
   const apiUrl  = `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`;
-  const payload = { ref: GITHUB_REF, inputs: { url: url, output_dir: "." } };
+  const payload = { ref: GITHUB_REF, inputs: { urls: url, output_dir: "." } };
 
   try {
     const resp = UrlFetchApp.fetch(apiUrl, {
@@ -91,6 +96,7 @@ function scrapeActiveRow() {
 
     const code = resp.getResponseCode();
     if (code === 204) {
+      sheet.getRange(row, COL.STATUS).setValue("pending");
       sheet.getRange(row, COL.NOTES).setValue(
         "Scrape triggered " + new Date().toLocaleString("en-IN")
       );
@@ -104,7 +110,73 @@ function scrapeActiveRow() {
 }
 
 // ============================================================
-// 2. Push row -> Shopify (create or update product)
+// 2. Bulk scrape — all rows that have a URL but no title
+// Fires ONE GitHub Actions workflow with all URLs (comma-separated).
+// ============================================================
+
+function scrapeEmptyRows() {
+  const ui    = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const data  = sheet.getDataRange().getValues();
+
+  const urls    = [];
+  const rowNums = [];
+  for (let r = 1; r < data.length; r++) {
+    const url   = (data[r][COL.URL - 1]   || "").toString().trim();
+    const title = (data[r][COL.TITLE - 1] || "").toString().trim();
+    if (url.startsWith("https://tradestarexports.com/product/") && !title) {
+      urls.push(url);
+      rowNums.push(r + 1);
+    }
+  }
+
+  if (!urls.length) {
+    ui.alert("No rows found with URL but empty title.");
+    return;
+  }
+
+  const estMin = Math.ceil(urls.length * 2);
+  const confirm = ui.alert(
+    "Bulk Scrape",
+    `Trigger scrape for ${urls.length} row(s)?\nEstimated completion: ~${estMin} min.`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (confirm !== ui.Button.OK) return;
+
+  const props = PropertiesService.getScriptProperties();
+  const PAT   = props.getProperty("GITHUB_PAT");
+  if (!PAT) { ui.alert("Missing GitHub PAT. Use Shopify -> Set credentials."); return; }
+
+  const apiUrl  = `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`;
+  const payload = { ref: GITHUB_REF, inputs: { urls: urls.join(","), output_dir: "." } };
+
+  try {
+    const resp = UrlFetchApp.fetch(apiUrl, {
+      method: "post",
+      headers: {
+        "Authorization":        `Bearer ${PAT}`,
+        "Accept":               "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type":         "application/json"
+      },
+      payload:            JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    const code = resp.getResponseCode();
+    if (code === 204) {
+      rowNums.forEach(rowNum => sheet.getRange(rowNum, COL.STATUS).setValue("pending"));
+      ui.alert(`Bulk scrape triggered for ${urls.length} product(s)!\nEstimated completion: ~${estMin} min.`);
+    } else {
+      ui.alert("GitHub API error: HTTP " + code + "\n" + resp.getContentText());
+    }
+  } catch (e) {
+    ui.alert("Exception: " + e.message);
+  }
+}
+
+// ============================================================
+// 3. Push active row -> Shopify (create or update product)
 // ============================================================
 
 function pushActiveRow() {
@@ -114,7 +186,7 @@ function pushActiveRow() {
 
   if (row === 1) { ui.alert("Select data row, not header."); return; }
 
-  const data  = sheet.getRange(row, 1, 1, 18).getValues()[0];
+  const data  = sheet.getRange(row, 1, 1, 20).getValues()[0];
   const title = (data[COL.TITLE - 1] || "").toString().trim();
   if (!title) { ui.alert("Row has no title. Scrape URL first."); return; }
 
@@ -126,27 +198,123 @@ function pushActiveRow() {
     return;
   }
 
-  const pipe = (v) =>
-    v ? v.toString().split("|").map(s => s.trim()).filter(Boolean) : [];
+  const result = _doPushRow(sheet, row, data, TOKEN, STORE);
 
+  if (result.ok) {
+    const qtyRaw = data[COL.QUANTITY - 1];
+    const qty    = (qtyRaw !== "" && qtyRaw !== null && qtyRaw !== undefined)
+                   ? parseInt(qtyRaw) : null;
+    let note = `${result.action} ${new Date().toLocaleString("en-IN")}`;
+    if (qty !== null && !isNaN(qty)) {
+      const invErr = setInventoryLevel(TOKEN, STORE, result.inventoryItemId, qty);
+      note += invErr ? " | Inv ERR: " + invErr : ` | qty=${qty}`;
+    }
+    sheet.getRange(row, COL.NOTES).setValue(note);
+    sheet.getRange(row, COL.STATUS).setValue("pushed");
+    ui.alert(`${result.action}! Product ID: ${result.pid}`);
+  } else {
+    sheet.getRange(row, COL.NOTES).setValue("ERR: " + result.error);
+    sheet.getRange(row, COL.STATUS).setValue("error");
+    ui.alert("Shopify error:\n" + result.error);
+  }
+}
+
+// ============================================================
+// 4. Bulk push — all rows with title but no Shopify ID
+// ============================================================
+
+function pushAllUnpushed() {
+  const ui    = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSheet();
+
+  const props = PropertiesService.getScriptProperties();
+  const TOKEN = props.getProperty("SHOPIFY_TOKEN");
+  const STORE = props.getProperty("SHOPIFY_STORE");
+  if (!TOKEN || !STORE) {
+    ui.alert("Missing Shopify credentials. Use Shopify -> Set credentials.");
+    return;
+  }
+
+  const allData = sheet.getDataRange().getValues();
+  const rows    = [];
+  for (let r = 1; r < allData.length; r++) {
+    const title     = (allData[r][COL.TITLE     - 1] || "").toString().trim();
+    const shopifyId = (allData[r][COL.SHOPIFY_ID - 1] || "").toString().trim();
+    if (title && !shopifyId) {
+      rows.push({ row: r + 1, data: allData[r] });
+    }
+  }
+
+  if (!rows.length) {
+    ui.alert("No unpushed rows found (need title, no Shopify ID).");
+    return;
+  }
+
+  const confirm = ui.alert(
+    "Bulk Push to Shopify",
+    `Push ${rows.length} product(s) to Shopify?`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (confirm !== ui.Button.OK) return;
+
+  let success = 0;
+  let failed  = 0;
+
+  rows.forEach(({ row, data }) => {
+    const result = _doPushRow(sheet, row, data, TOKEN, STORE);
+
+    if (result.ok) {
+      const qtyRaw = data[COL.QUANTITY - 1];
+      const qty    = (qtyRaw !== "" && qtyRaw !== null && qtyRaw !== undefined)
+                     ? parseInt(qtyRaw) : null;
+      let note = `Created ${new Date().toLocaleString("en-IN")}`;
+      if (qty !== null && !isNaN(qty)) {
+        const invErr = setInventoryLevel(TOKEN, STORE, result.inventoryItemId, qty);
+        note += invErr ? " | Inv ERR: " + invErr : ` | qty=${qty}`;
+      }
+      sheet.getRange(row, COL.NOTES).setValue(note);
+      sheet.getRange(row, COL.STATUS).setValue("pushed");
+      success++;
+    } else {
+      sheet.getRange(row, COL.NOTES).setValue("ERR: " + result.error);
+      sheet.getRange(row, COL.STATUS).setValue("error");
+      failed++;
+    }
+
+    Utilities.sleep(600);   // ~0.6s between Shopify API calls to stay under rate limit
+  });
+
+  ui.alert(`Bulk push complete: ${success} pushed, ${failed} failed.`);
+}
+
+// ============================================================
+// Internal: core Shopify product create/update
+// Returns { ok, pid, vid, inventoryItemId, action } or { ok: false, error }
+// Writes shopify_id and variant_id back to sheet on success.
+// ============================================================
+
+function _doPushRow(sheet, row, data, TOKEN, STORE) {
   const cats       = pipe(data[COL.CATEGORIES - 1]);
   const tags       = pipe(data[COL.TAGS - 1]).join(", ");
   const imgSrcs    = pipe(data[COL.IMAGES - 1]).map(src => ({ src }));
   const wt         = parseWeight(data[COL.WEIGHT - 1]);
-  const existingId = (data[COL.SHOPIFY_ID - 1] || "").toString().trim();
-  const storedVid  = (data[COL.VARIANT_ID - 1] || "").toString().trim();
+  const existingId = (data[COL.SHOPIFY_ID     - 1] || "").toString().trim();
+  const storedVid  = (data[COL.VARIANT_ID     - 1] || "").toString().trim();
   const priceRaw   = data[COL.PRICE - 1];
   const price      = (priceRaw !== "" && priceRaw !== null && priceRaw !== undefined)
                      ? priceRaw.toString().trim() : "0.00";
 
+  const shopifyStatusRaw = (data[COL.SHOPIFY_STATUS - 1] || "").toString().trim().toLowerCase();
+  const shopifyStatus    = shopifyStatusRaw === "active" ? "active" : "draft";
+
   const payload = {
     product: {
-      title:        title,
+      title:        (data[COL.TITLE    - 1] || "").toString(),
       body_html:    (data[COL.FULL_DESC - 1] || data[COL.SHORT_DESC - 1] || "").toString(),
       vendor:       "Tradestar Exports",
       product_type: cats[0] || "",
       tags:         tags,
-      status:       "draft",
+      status:       shopifyStatus,
       variants: [Object.assign(
         {
           sku:                  (data[COL.SKU - 1] || "").toString(),
@@ -189,34 +357,18 @@ function pushActiveRow() {
       const vid     = variant.id;
       sheet.getRange(row, COL.SHOPIFY_ID).setValue(pid);
       sheet.getRange(row, COL.VARIANT_ID).setValue(vid);
-
-      // Set inventory quantity if provided in col Q (optional)
-      const qtyRaw = data[COL.QUANTITY - 1];
-      const qty    = (qtyRaw !== "" && qtyRaw !== null && qtyRaw !== undefined)
-                     ? parseInt(qtyRaw) : null;
-      let note = `${action} ${new Date().toLocaleString("en-IN")}`;
-      if (qty !== null && !isNaN(qty)) {
-        const invErr = setInventoryLevel(TOKEN, STORE, variant.inventory_item_id, qty);
-        note += invErr ? " | Inv ERR: " + invErr : ` | qty=${qty}`;
-      }
-
-      sheet.getRange(row, COL.NOTES).setValue(note);
-      ui.alert(`${action}! Product ID: ${pid}`);
+      return { ok: true, pid, vid, inventoryItemId: variant.inventory_item_id, action };
     } else {
-      const err = body.errors
-        ? JSON.stringify(body.errors)
-        : `HTTP ${code}: ${resp.getContentText()}`;
-      sheet.getRange(row, COL.NOTES).setValue("ERR: " + err);
-      ui.alert("Shopify error:\n" + err);
+      const err = body.errors ? JSON.stringify(body.errors) : `HTTP ${code}: ${resp.getContentText()}`;
+      return { ok: false, error: err };
     }
   } catch (e) {
-    sheet.getRange(row, COL.NOTES).setValue("EXC: " + e.message);
-    ui.alert("Exception: " + e.message);
+    return { ok: false, error: e.message };
   }
 }
 
 // ============================================================
-// 3. Update price and/or quantity on Shopify
+// 5. Update price and/or quantity on Shopify
 // ============================================================
 
 function updatePriceQty() {
@@ -226,7 +378,7 @@ function updatePriceQty() {
 
   if (row === 1) { ui.alert("Select data row, not header."); return; }
 
-  const data      = sheet.getRange(row, 1, 1, 18).getValues()[0];
+  const data      = sheet.getRange(row, 1, 1, 20).getValues()[0];
   const shopifyId = (data[COL.SHOPIFY_ID - 1] || "").toString().trim();
   if (!shopifyId) { ui.alert("No Shopify ID in col N. Push to Shopify first."); return; }
 
@@ -286,7 +438,6 @@ function updatePriceQty() {
 
     // Update inventory quantity
     if (qty !== null && !isNaN(qty)) {
-      // Get inventory_item_id if not already fetched above
       if (!inventoryItemId) {
         const r = UrlFetchApp.fetch(`${base}/variants/${variantId}.json`, {
           headers: { "X-Shopify-Access-Token": TOKEN },
@@ -308,13 +459,16 @@ function updatePriceQty() {
       sheet.getRange(row, COL.NOTES).setValue(
         "Price/qty updated " + new Date().toLocaleString("en-IN")
       );
+      sheet.getRange(row, COL.STATUS).setValue("pushed");
       ui.alert("Price/qty updated on Shopify!");
     } else {
       sheet.getRange(row, COL.NOTES).setValue("ERR: " + errors.join("; "));
+      sheet.getRange(row, COL.STATUS).setValue("error");
       ui.alert("Errors:\n" + errors.join("\n"));
     }
   } catch (e) {
     sheet.getRange(row, COL.NOTES).setValue("EXC: " + e.message);
+    sheet.getRange(row, COL.STATUS).setValue("error");
     ui.alert("Exception: " + e.message);
   }
 }
@@ -322,6 +476,13 @@ function updatePriceQty() {
 // ============================================================
 // Helpers
 // ============================================================
+
+/**
+ * Split a pipe-separated sheet cell value into an array.
+ */
+function pipe(v) {
+  return v ? v.toString().split("|").map(s => s.trim()).filter(Boolean) : [];
+}
 
 /**
  * Set inventory level for a variant at the first location.
@@ -367,7 +528,9 @@ function setupSheetHeaders() {
   sheet.getRange("P1").setValue("price");
   sheet.getRange("Q1").setValue("quantity");
   sheet.getRange("R1").setValue("variant_id");
-  SpreadsheetApp.getUi().alert("Headers P/Q/R added.");
+  sheet.getRange("S1").setValue("status");
+  sheet.getRange("T1").setValue("shopify_status");
+  SpreadsheetApp.getUi().alert("Headers P/Q/R/S/T added.");
 }
 
 function promptCredentials() {

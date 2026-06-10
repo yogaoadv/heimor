@@ -3,8 +3,8 @@ name: Scrape Product -> Sheets
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "Product URL (e.g. https://tradestarexports.com/product/some-product/)"
+      urls:
+        description: "Comma-separated product URLs to scrape"
         required: true
         type: string
       output_dir:
@@ -33,4 +33,4 @@ jobs:
         run: echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service_account.json
 
       - name: Scrape + push to Sheet
-        run: python runner.py --url "${{ inputs.url }}" --output "${{ inputs.output_dir }}"
+        run: python runner.py --urls "${{ inputs.urls }}" --output "${{ inputs.output_dir }}"
