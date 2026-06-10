@@ -242,3 +242,24 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Status helper — writes scrape/error state to col S (STATUS_COL)
+# Matches COL.STATUS = 19 in apps_script.js
+# ---------------------------------------------------------------------------
+
+STATUS_COL = 19
+
+
+def set_status(url: str, status: str) -> None:
+    """Write status to STATUS_COL for the row matching url. No-op if URL not found."""
+    ws    = open_worksheet()
+    col_a = ws.col_values(1)   # 0-indexed; index 0 = row 1 (header)
+    try:
+        row_num = col_a.index(url) + 1
+    except ValueError:
+        return
+    if row_num <= 1:
+        return
+    ws.update_cell(row_num, STATUS_COL, status)
