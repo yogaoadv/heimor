@@ -134,7 +134,10 @@ function pushActiveRow() {
   const imgSrcs    = pipe(data[COL.IMAGES - 1]).map(src => ({ src }));
   const wt         = parseWeight(data[COL.WEIGHT - 1]);
   const existingId = (data[COL.SHOPIFY_ID - 1] || "").toString().trim();
-  const price      = (data[COL.PRICE - 1] || "0.00").toString().trim();
+  const storedVid  = (data[COL.VARIANT_ID - 1] || "").toString().trim();
+  const priceRaw   = data[COL.PRICE - 1];
+  const price      = (priceRaw !== "" && priceRaw !== null && priceRaw !== undefined)
+                     ? priceRaw.toString().trim() : "0.00";
 
   const payload = {
     product: {
@@ -144,16 +147,19 @@ function pushActiveRow() {
       product_type: cats[0] || "",
       tags:         tags,
       status:       "draft",
-      variants: [{
-        sku:                  (data[COL.SKU - 1] || "").toString(),
-        price:                price,
-        requires_shipping:    true,
-        taxable:              false,
-        weight:               wt.value,
-        weight_unit:          wt.unit,
-        inventory_management: "shopify",
-        inventory_policy:     "deny"
-      }],
+      variants: [Object.assign(
+        {
+          sku:                  (data[COL.SKU - 1] || "").toString(),
+          price:                price,
+          requires_shipping:    true,
+          taxable:              false,
+          weight:               wt.value,
+          weight_unit:          wt.unit,
+          inventory_management: "shopify",
+          inventory_policy:     "deny"
+        },
+        storedVid ? { id: Number(storedVid) } : {}
+      )],
       images: imgSrcs
     }
   };
@@ -224,7 +230,9 @@ function updatePriceQty() {
   const shopifyId = (data[COL.SHOPIFY_ID - 1] || "").toString().trim();
   if (!shopifyId) { ui.alert("No Shopify ID in col N. Push to Shopify first."); return; }
 
-  const price  = (data[COL.PRICE - 1] || "").toString().trim();
+  const priceRaw2 = data[COL.PRICE - 1];
+  const price  = (priceRaw2 !== "" && priceRaw2 !== null && priceRaw2 !== undefined)
+                 ? priceRaw2.toString().trim() : "";
   const qtyRaw = data[COL.QUANTITY - 1];
   const qty    = qtyRaw !== "" && qtyRaw !== null ? parseInt(qtyRaw) : null;
   let variantId = (data[COL.VARIANT_ID - 1] || "").toString().trim();
@@ -243,66 +251,71 @@ function updatePriceQty() {
   const errors = [];
   let inventoryItemId = null;
 
-  // Fetch variant ID + inventory_item_id if not stored in col R
-  if (!variantId) {
-    const r = UrlFetchApp.fetch(`${base}/products/${shopifyId}.json`, {
-      headers: { "X-Shopify-Access-Token": TOKEN },
-      muteHttpExceptions: true
-    });
-    if (r.getResponseCode() !== 200) {
-      ui.alert("Could not fetch product from Shopify. Check Shopify ID in col N.");
-      return;
-    }
-    const variant   = JSON.parse(r.getContentText()).product.variants[0];
-    variantId       = variant.id.toString();
-    inventoryItemId = variant.inventory_item_id;
-    sheet.getRange(row, COL.VARIANT_ID).setValue(variantId);
-  }
-
-  // Update price
-  if (price) {
-    const r = UrlFetchApp.fetch(`${base}/variants/${variantId}.json`, {
-      method: "put",
-      headers: {
-        "Content-Type":           "application/json",
-        "X-Shopify-Access-Token": TOKEN
-      },
-      payload:            JSON.stringify({ variant: { id: parseInt(variantId), price: price } }),
-      muteHttpExceptions: true
-    });
-    if (r.getResponseCode() !== 200) {
-      errors.push("Price update failed: " + r.getContentText());
-    }
-  }
-
-  // Update inventory quantity
-  if (qty !== null) {
-    // Get inventory_item_id if not already fetched above
-    if (!inventoryItemId) {
-      const r = UrlFetchApp.fetch(`${base}/variants/${variantId}.json`, {
+  try {
+    // Fetch variant ID + inventory_item_id if not stored in col R
+    if (!variantId) {
+      const r = UrlFetchApp.fetch(`${base}/products/${shopifyId}.json`, {
         headers: { "X-Shopify-Access-Token": TOKEN },
         muteHttpExceptions: true
       });
-      if (r.getResponseCode() === 200) {
-        inventoryItemId = JSON.parse(r.getContentText()).variant.inventory_item_id;
-      } else {
-        errors.push("Could not fetch variant to get inventory_item_id.");
+      if (r.getResponseCode() !== 200) {
+        ui.alert("Could not fetch product from Shopify. Check Shopify ID in col N.");
+        return;
+      }
+      const variant   = JSON.parse(r.getContentText()).product.variants[0];
+      variantId       = variant.id.toString();
+      inventoryItemId = variant.inventory_item_id;
+      sheet.getRange(row, COL.VARIANT_ID).setValue(variantId);
+    }
+
+    // Update price
+    if (price) {
+      const r = UrlFetchApp.fetch(`${base}/variants/${variantId}.json`, {
+        method: "put",
+        headers: {
+          "Content-Type":           "application/json",
+          "X-Shopify-Access-Token": TOKEN
+        },
+        payload:            JSON.stringify({ variant: { id: parseInt(variantId), price: price } }),
+        muteHttpExceptions: true
+      });
+      if (r.getResponseCode() !== 200) {
+        errors.push("Price update failed: " + r.getContentText());
       }
     }
-    if (inventoryItemId) {
-      const invErr = setInventoryLevel(TOKEN, STORE, inventoryItemId, qty);
-      if (invErr) errors.push(invErr);
-    }
-  }
 
-  if (errors.length === 0) {
-    sheet.getRange(row, COL.NOTES).setValue(
-      "Price/qty updated " + new Date().toLocaleString("en-IN")
-    );
-    ui.alert("Price/qty updated on Shopify!");
-  } else {
-    sheet.getRange(row, COL.NOTES).setValue("ERR: " + errors.join("; "));
-    ui.alert("Errors:\n" + errors.join("\n"));
+    // Update inventory quantity
+    if (qty !== null && !isNaN(qty)) {
+      // Get inventory_item_id if not already fetched above
+      if (!inventoryItemId) {
+        const r = UrlFetchApp.fetch(`${base}/variants/${variantId}.json`, {
+          headers: { "X-Shopify-Access-Token": TOKEN },
+          muteHttpExceptions: true
+        });
+        if (r.getResponseCode() === 200) {
+          inventoryItemId = JSON.parse(r.getContentText()).variant.inventory_item_id;
+        } else {
+          errors.push("Could not fetch variant to get inventory_item_id.");
+        }
+      }
+      if (inventoryItemId) {
+        const invErr = setInventoryLevel(TOKEN, STORE, inventoryItemId, qty);
+        if (invErr) errors.push(invErr);
+      }
+    }
+
+    if (errors.length === 0) {
+      sheet.getRange(row, COL.NOTES).setValue(
+        "Price/qty updated " + new Date().toLocaleString("en-IN")
+      );
+      ui.alert("Price/qty updated on Shopify!");
+    } else {
+      sheet.getRange(row, COL.NOTES).setValue("ERR: " + errors.join("; "));
+      ui.alert("Errors:\n" + errors.join("\n"));
+    }
+  } catch (e) {
+    sheet.getRange(row, COL.NOTES).setValue("EXC: " + e.message);
+    ui.alert("Exception: " + e.message);
   }
 }
 
