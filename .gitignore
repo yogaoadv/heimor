@@ -18,12 +18,3 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
-# Added by code-review-graph
-.code-review-graph/
-.mcp.json
-CLAUDE.md
-.claude/settings.json
-.claude/skills/debug-issue/skill.md
-.claude/skills/explore-codebase/skill.md
-.claude/skills/refactor-safely/skill.md
-.claude/skills/review-changes/skill.md
