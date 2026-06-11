@@ -3,9 +3,12 @@
 // Paste this into: Google Sheet -> Extensions -> Apps Script
 //
 // SETUP: Project Settings -> Script Properties -> Add:
-//   SHOPIFY_TOKEN  =  shpat_xxxxxxxxxxxx
-//   SHOPIFY_STORE  =  8ctj86-ft.myshopify.com
-//   GITHUB_PAT     =  github_pat_xxxxxxxxxxxx  (needs: repo + workflow scope)
+//   SHOPIFY_CLIENT_ID      =  your_client_id
+//   SHOPIFY_CLIENT_SECRET  =  your_client_secret
+//   SHOPIFY_STORE          =  8ctj86-ft.myshopify.com
+//   GITHUB_PAT             =  github_pat_xxxxxxxxxxxx  (needs: repo + workflow scope)
+//
+// SHOPIFY_TOKEN + SHOPIFY_TOKEN_EXPIRY are managed automatically (24h expiry, auto-refresh).
 //
 // Sheet columns:
 //   A  url              B  title           C  sku
@@ -191,12 +194,11 @@ function pushActiveRow() {
   if (!title) { ui.alert("Row has no title. Scrape URL first."); return; }
 
   const props = PropertiesService.getScriptProperties();
-  const TOKEN = props.getProperty("SHOPIFY_TOKEN");
   const STORE = props.getProperty("SHOPIFY_STORE");
-  if (!TOKEN || !STORE) {
-    ui.alert("Missing Shopify credentials. Use Shopify -> Set credentials.");
-    return;
-  }
+  if (!STORE) { ui.alert("Missing Shopify store. Use Shopify -> Set credentials."); return; }
+
+  let TOKEN;
+  try { TOKEN = _getShopifyToken(STORE); } catch (e) { ui.alert(e.message); return; }
 
   const result = _doPushRow(sheet, row, data, TOKEN, STORE);
 
@@ -228,12 +230,11 @@ function pushAllUnpushed() {
   const sheet = SpreadsheetApp.getActiveSheet();
 
   const props = PropertiesService.getScriptProperties();
-  const TOKEN = props.getProperty("SHOPIFY_TOKEN");
   const STORE = props.getProperty("SHOPIFY_STORE");
-  if (!TOKEN || !STORE) {
-    ui.alert("Missing Shopify credentials. Use Shopify -> Set credentials.");
-    return;
-  }
+  if (!STORE) { ui.alert("Missing Shopify store. Use Shopify -> Set credentials."); return; }
+
+  let TOKEN;
+  try { TOKEN = _getShopifyToken(STORE); } catch (e) { ui.alert(e.message); return; }
 
   const allData = sheet.getDataRange().getValues();
   const rows    = [];
@@ -395,9 +396,11 @@ function updatePriceQty() {
   }
 
   const props = PropertiesService.getScriptProperties();
-  const TOKEN = props.getProperty("SHOPIFY_TOKEN");
   const STORE = props.getProperty("SHOPIFY_STORE");
-  if (!TOKEN || !STORE) { ui.alert("Missing Shopify credentials."); return; }
+  if (!STORE) { ui.alert("Missing Shopify store. Use Shopify -> Set credentials."); return; }
+
+  let TOKEN;
+  try { TOKEN = _getShopifyToken(STORE); } catch (e) { ui.alert(e.message); return; }
 
   const base   = `https://${STORE}/admin/api/${API_VERSION}`;
   const errors = [];
@@ -537,8 +540,11 @@ function promptCredentials() {
   const ui    = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
 
-  const t = ui.prompt("Shopify token (shpat_xxx):");
-  if (t.getSelectedButton() !== ui.Button.OK) return;
+  const cid = ui.prompt("Shopify Client ID:");
+  if (cid.getSelectedButton() !== ui.Button.OK) return;
+
+  const csec = ui.prompt("Shopify Client Secret:");
+  if (csec.getSelectedButton() !== ui.Button.OK) return;
 
   const s = ui.prompt("Shopify store domain (e.g. 8ctj86-ft.myshopify.com):");
   if (s.getSelectedButton() !== ui.Button.OK) return;
@@ -546,8 +552,50 @@ function promptCredentials() {
   const g = ui.prompt("GitHub PAT (github_pat_xxx) — needs repo + workflow scope:");
   if (g.getSelectedButton() !== ui.Button.OK) return;
 
-  props.setProperty("SHOPIFY_TOKEN", t.getResponseText().trim());
-  props.setProperty("SHOPIFY_STORE", s.getResponseText().trim());
-  props.setProperty("GITHUB_PAT",    g.getResponseText().trim());
-  ui.alert("All credentials saved.");
+  props.setProperty("SHOPIFY_CLIENT_ID",     cid.getResponseText().trim());
+  props.setProperty("SHOPIFY_CLIENT_SECRET", csec.getResponseText().trim());
+  props.setProperty("SHOPIFY_STORE",         s.getResponseText().trim());
+  props.setProperty("GITHUB_PAT",            g.getResponseText().trim());
+  // Clear cached token so it is re-fetched with new credentials
+  props.deleteProperty("SHOPIFY_TOKEN");
+  props.deleteProperty("SHOPIFY_TOKEN_EXPIRY");
+  ui.alert("All credentials saved. Token will be fetched automatically on next Shopify action.");
+}
+
+// ============================================================
+// Token management — fetch + cache Shopify Admin API token
+// Token expires after 24h; cached with 5-min early-expiry buffer.
+// ============================================================
+
+function _getShopifyToken(store) {
+  const props  = PropertiesService.getScriptProperties();
+  const cached = props.getProperty("SHOPIFY_TOKEN");
+  const expiry = parseInt(props.getProperty("SHOPIFY_TOKEN_EXPIRY") || "0");
+
+  if (cached && Date.now() < expiry - 5 * 60 * 1000) return cached;
+
+  const clientId     = props.getProperty("SHOPIFY_CLIENT_ID");
+  const clientSecret = props.getProperty("SHOPIFY_CLIENT_SECRET");
+  if (!clientId || !clientSecret) {
+    throw new Error("Missing Shopify client credentials. Use Shopify -> Set credentials.");
+  }
+
+  const resp = UrlFetchApp.fetch(
+    `https://${store}/admin/oauth/access_token`,
+    {
+      method:             "post",
+      headers:            { "Content-Type": "application/x-www-form-urlencoded" },
+      payload:            `grant_type=client_credentials&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}`,
+      muteHttpExceptions: true
+    }
+  );
+
+  if (resp.getResponseCode() !== 200) {
+    throw new Error("Token refresh failed: HTTP " + resp.getResponseCode() + " — " + resp.getContentText());
+  }
+
+  const token = JSON.parse(resp.getContentText()).access_token;
+  props.setProperty("SHOPIFY_TOKEN",        token);
+  props.setProperty("SHOPIFY_TOKEN_EXPIRY", String(Date.now() + 23 * 60 * 60 * 1000));
+  return token;
 }
