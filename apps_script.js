@@ -311,7 +311,10 @@ function _doPushRow(sheet, row, data, TOKEN, STORE) {
   const payload = {
     product: {
       title:        (data[COL.TITLE    - 1] || "").toString(),
-      body_html:    (data[COL.FULL_DESC - 1] || data[COL.SHORT_DESC - 1] || "").toString(),
+      body_html:    _formatDescription(
+                      (data[COL.SHORT_DESC - 1] || "").toString(),
+                      (data[COL.FULL_DESC  - 1] || "").toString()
+                    ),
       vendor:       "Tradestar Exports",
       product_type: cats[0] || "",
       tags:         tags,
@@ -514,6 +517,59 @@ function setInventoryLevel(TOKEN, STORE, inventoryItemId, qty) {
     muteHttpExceptions: true
   });
   return r.getResponseCode() === 200 ? null : "Inventory set failed: " + r.getContentText();
+}
+
+function _parseShortDesc(raw) {
+  if (!raw) return [];
+  const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+  const pairs = [];
+  let keyParts = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line === ":") {
+      // standalone colon — keyParts accumulated so far = key
+      const key = keyParts.join(" ").trim();
+      keyParts = [];
+      i++;
+      if (key && i < lines.length) pairs.push({ key, value: lines[i] });
+      i++;
+    } else if (/\s*:\s*$/.test(line)) {
+      // line ends with ":" e.g. "Usage :"
+      keyParts.push(line.replace(/\s*:\s*$/, "").trim());
+      const key = keyParts.join(" ").trim();
+      keyParts = [];
+      i++;
+      if (key && i < lines.length) pairs.push({ key, value: lines[i] });
+      i++;
+    } else {
+      keyParts.push(line);
+      i++;
+    }
+  }
+
+  return pairs;
+}
+
+function _formatDescription(shortDesc, fullDesc) {
+  const pairs = _parseShortDesc(shortDesc);
+  let html = "";
+
+  if (pairs.length > 0) {
+    html += pairs
+      .map(({ key, value }) => `<p><strong>${key}</strong>: ${value}</p>`)
+      .join("\n");
+  } else if (shortDesc) {
+    html += `<p>${shortDesc}</p>`;
+  }
+
+  if (fullDesc) {
+    const paras = fullDesc.split("\n").map(l => l.trim()).filter(Boolean);
+    if (paras.length) html += "\n<br>\n" + paras.map(p => `<p>${p}</p>`).join("\n");
+  }
+
+  return html;
 }
 
 function parseWeight(raw) {
